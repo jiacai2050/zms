@@ -4,43 +4,6 @@ const simargs = @import("simargs");
 const MAX_FILE_SIZE: usize = 1024 * 1024 * 500; // 500M
 const UPSTREAM_URL: []const u8 = "https://ziglang.org";
 
-const Cache = struct {
-    mutex: std.Thread.Mutex = .{},
-    items: std.StringHashMap(void),
-    allocator: std.mem.Allocator,
-    fn init(allocator: std.mem.Allocator) Cache {
-        return .{
-            .items = std.StringHashMap(void).init(allocator),
-            .allocator = allocator,
-        };
-    }
-
-    fn add(self: *Cache, key: []const u8) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        try self.items.put(key, {});
-    }
-
-    fn contains(self: *Cache, key: []const u8) bool {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        return self.items.contains(key);
-    }
-
-    fn remove(self: *Cache, key: []const u8) bool {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        return self.items.remove(key);
-    }
-
-    fn deinit(self: *Cache) void {
-        self.items.deinit();
-    }
-};
-
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
 

@@ -1,4 +1,6 @@
 * ZMS
+[[https://github.com/jiacai2050/zms/actions/workflows/CI.yml][https://github.com/jiacai2050/zms/actions/workflows/CI.yml/badge.svg]]
+
 Zig mirror server, see rationale [[https://github.com/mlugg/setup-zig/issues/15][here]].
 
 * Usage

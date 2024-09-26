@@ -1,0 +1,15 @@
+.{
+    .name = "zms",
+    .version = "0.1.0",
+    .dependencies = .{
+        .zigcli = .{
+            .url = "https://github.com/jiacai2050/zigcli/archive/d48eba82af25c16f01faf759fb9c11aacfe58a99.tar.gz",
+            .hash = "1220e18590afc407a9e947f7c724a4be509adbbab916a5253efc0bb07457de955bf1",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}

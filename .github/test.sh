@@ -13,7 +13,7 @@ fb=/tmp/b
 
 curl -o ${fa} 0:9090/zig-macos-aarch64-0.12.0.tar.xz &
 
-sleep 5
+sleep 1
 
 curl -o ${fb} 0:9090/zig-macos-aarch64-0.12.0.tar.xz
 

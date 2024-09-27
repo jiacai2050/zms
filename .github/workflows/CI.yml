@@ -41,3 +41,7 @@ jobs:
           zig fmt --check .
           zig build
           zig build test
+      - name: download test(ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          bash .github/test.sh

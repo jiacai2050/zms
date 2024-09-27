@@ -3,6 +3,31 @@ const simargs = @import("simargs");
 
 const MAX_FILE_SIZE: usize = 1024 * 1024 * 500; // 500M
 const UPSTREAM_URL: []const u8 = "https://ziglang.org";
+const Context = struct {
+    arena: std.heap.ArenaAllocator,
+    download_dir: []const u8,
+
+    mutex: *std.Thread.Mutex,
+    pending_downloads: *std.StringHashMap(void),
+
+    fn init(
+        arena: std.heap.ArenaAllocator,
+        dir: []const u8,
+        mutex: *std.Thread.Mutex,
+        pending: *std.StringHashMap(void),
+    ) Context {
+        return .{
+            .arena = arena,
+            .download_dir = dir,
+            .mutex = mutex,
+            .pending_downloads = pending,
+        };
+    }
+
+    fn deinit(ctx: Context) void {
+        ctx.arena.deinit();
+    }
+};
 
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
@@ -93,76 +118,30 @@ fn accept(ctx: *Context, conn: std.net.Server.Connection) void {
     }
 }
 
-const Context = struct {
-    arena: std.heap.ArenaAllocator,
-    download_dir: []const u8,
+fn serveRequest(ctx: *Context, request: *std.http.Server.Request) !void {
+    const allocator = ctx.arena.allocator();
+    const path = request.head.target;
+    const i = std.mem.lastIndexOfScalar(u8, path, '/') orelse unreachable;
+    const requested_file = path[i + 1 ..];
 
-    mutex: *std.Thread.Mutex,
-    pending_downloads: *std.StringHashMap(void),
-
-    fn init(
-        arena: std.heap.ArenaAllocator,
-        dir: []const u8,
-        mutex: *std.Thread.Mutex,
-        pending: *std.StringHashMap(void),
-    ) Context {
-        return .{
-            .arena = arena,
-            .download_dir = dir,
-            .mutex = mutex,
-            .pending_downloads = pending,
-        };
+    if (requested_file.len == 0) {
+        return try request.respond(
+            \\ <h1>Zig tarballs mirror</h1>
+            \\ <p>This site acts as a mirror of ziglang.org/download</p>
+            \\ <p><a href="https://github.com/jiacai2050/zms">Source code</a></p>
+        , .{
+            .extra_headers = &.{
+                .{ .name = "content-type", .value = "text/html; charset=utf-8" },
+            },
+        });
     }
 
-    fn deinit(ctx: Context) void {
-        ctx.arena.deinit();
-    }
-};
-
-fn loadFromDisk(arena_allocator: std.mem.Allocator, filepath: []const u8) ![]u8 {
-    std.log.debug("Try load from disk, path:{s}", .{filepath});
-
-    const f = try std.fs.openFileAbsolute(filepath, .{});
-    defer f.close();
-
-    return try f.readToEndAlloc(arena_allocator, MAX_FILE_SIZE);
-}
-
-fn loadFromUpstream(arena_allocator: std.mem.Allocator, filename: []const u8) ![]u8 {
-    const sub_dir = if (std.mem.indexOf(u8, filename, "dev")) |_|
-        // "https://ziglang.org/builds/zig-linux-armv7a-0.14.0-dev.1651+ffd071f55.tar.xz"
-        "builds"
-    else blk: {
-        // We need to extract the version number from the filename
-        // "https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz"
-        const a = std.mem.lastIndexOfScalar(u8, filename, '-') orelse unreachable;
-        const b = std.mem.indexOfScalarPos(u8, filename, a + 1, '.') orelse unreachable; // major version
-        const c = std.mem.indexOfScalarPos(u8, filename, b + 1, '.') orelse unreachable; // min version
-        const d = std.mem.indexOfScalarPos(u8, filename, c + 1, '.') orelse unreachable; // patch version
-
-        const version = filename[a + 1 .. d];
-        break :blk try std.fmt.allocPrint(arena_allocator, "download/{s}", .{version});
-    };
-    const tarball_url = try std.fmt.allocPrint(arena_allocator, "{s}/{s}/{s}", .{
-        UPSTREAM_URL,
-        sub_dir,
-        filename,
+    const bytes = try loadTarball(ctx, allocator, requested_file);
+    try request.respond(bytes, .{
+        .extra_headers = &.{
+            .{ .name = "content-type", .value = "application/octet-stream" },
+        },
     });
-    std.log.debug("Downloading {s} from upstream", .{tarball_url});
-
-    var client = std.http.Client{ .allocator = arena_allocator };
-    var resp_buffer = std.ArrayList(u8).init(arena_allocator);
-    const ret = try client.fetch(.{
-        .location = .{ .url = tarball_url },
-        .response_storage = .{ .dynamic = &resp_buffer },
-        .max_append_size = MAX_FILE_SIZE,
-    });
-
-    if (ret.status != .ok) {
-        std.log.err("Failed to download {s} from upstream: {d}", .{ tarball_url, ret.status });
-        return error.UnexpectedHttpStatusCode;
-    }
-    return resp_buffer.items;
 }
 
 fn loadTarball(
@@ -179,7 +158,7 @@ fn loadTarball(
                 if (existing) {
                     ctx.mutex.unlock();
 
-                    std.log.debug("{s} is being fetched from update, wait 5s and retry...", .{filename});
+                    std.log.debug("{s} is being fetched from upstream, wait 5s and retry...", .{filename});
                     std.time.sleep(5 * std.time.ns_per_s);
                     return loadTarball(ctx, arena_allocator, filename);
                 }
@@ -210,20 +189,47 @@ fn loadTarball(
     };
 }
 
-fn serveRequest(ctx: *Context, request: *std.http.Server.Request) !void {
-    const allocator = ctx.arena.allocator();
-    const path = request.head.target;
-    const i = std.mem.lastIndexOfScalar(u8, path, '/') orelse unreachable;
-    const requested_file = path[i + 1 ..];
+fn loadFromDisk(arena_allocator: std.mem.Allocator, filepath: []const u8) ![]u8 {
+    std.log.debug("Try load from disk, path:{s}", .{filepath});
+    const f = try std.fs.openFileAbsolute(filepath, .{});
+    defer f.close();
 
-    if (requested_file.len == 0) {
-        return try request.respond("Zig tarball name is expected!", .{ .status = .bad_request });
-    }
+    return try f.readToEndAlloc(arena_allocator, MAX_FILE_SIZE);
+}
 
-    const bytes = try loadTarball(ctx, allocator, requested_file);
-    try request.respond(bytes, .{
-        .extra_headers = &.{
-            .{ .name = "content-type", .value = "application/octet-stream" },
-        },
+fn loadFromUpstream(arena_allocator: std.mem.Allocator, filename: []const u8) ![]u8 {
+    const sub_dir = if (std.mem.indexOf(u8, filename, "dev")) |_|
+        // "https://ziglang.org/builds/zig-linux-armv7a-0.14.0-dev.1651+ffd071f55.tar.xz"
+        "builds"
+    else blk: {
+        // We need to extract the version number from the filename
+        // "https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz"
+        const a = std.mem.lastIndexOfScalar(u8, filename, '-') orelse return error.BadFilename;
+        const b = std.mem.indexOfScalarPos(u8, filename, a + 1, '.') orelse return error.BadFilename; // major version
+        const c = std.mem.indexOfScalarPos(u8, filename, b + 1, '.') orelse return error.BadFilename; // min version
+        const d = std.mem.indexOfScalarPos(u8, filename, c + 1, '.') orelse return error.BadFilename; // patch version
+
+        const version = filename[a + 1 .. d];
+        break :blk try std.fmt.allocPrint(arena_allocator, "download/{s}", .{version});
+    };
+    const tarball_url = try std.fmt.allocPrint(arena_allocator, "{s}/{s}/{s}", .{
+        UPSTREAM_URL,
+        sub_dir,
+        filename,
     });
+    std.log.debug("Downloading {s} from upstream", .{tarball_url});
+
+    var client = std.http.Client{ .allocator = arena_allocator };
+    var resp_buffer = std.ArrayList(u8).init(arena_allocator);
+    const ret = try client.fetch(.{
+        .location = .{ .url = tarball_url },
+        .response_storage = .{ .dynamic = &resp_buffer },
+        .max_append_size = MAX_FILE_SIZE,
+    });
+
+    if (ret.status != .ok) {
+        std.log.err("Failed to download {s} from upstream: {d}", .{ tarball_url, ret.status });
+        return error.UnexpectedHttpStatusCode;
+    }
+    return resp_buffer.items;
 }

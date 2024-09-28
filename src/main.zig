@@ -7,13 +7,13 @@ const UPSTREAM_URL: []const u8 = "https://ziglang.org";
 const Context = struct {
     download_dir: []const u8,
 
-    mutex: *std.Thread.Mutex,
-    pending_downloads: *std.StringHashMap(void),
+    mutex: std.Thread.Mutex,
+    pending_downloads: std.StringHashMap(void),
 
     fn init(
         dir: []const u8,
-        mutex: *std.Thread.Mutex,
-        pending: *std.StringHashMap(void),
+        mutex: std.Thread.Mutex,
+        pending: std.StringHashMap(void),
     ) Context {
         return .{
             .download_dir = dir,
@@ -21,12 +21,16 @@ const Context = struct {
             .pending_downloads = pending,
         };
     }
+
+    fn deinit(self: *Context) void {
+        self.pending_downloads.deinit();
+    }
 };
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer if (gpa.deinit() != .ok) @panic("leak");
-    var allocator = gpa.allocator();
+    const allocator = gpa.allocator();
 
     var parsed = try simargs.parse(allocator, struct {
         host: []const u8 = "0.0.0.0",
@@ -61,37 +65,30 @@ pub fn main() !void {
     defer server.deinit();
     std.log.info("Welcome to Zig Mirror Server, listen on {any}", .{server.listen_address});
 
-    var pool = try allocator.create(std.Thread.Pool);
+    var pool: std.Thread.Pool = undefined;
     defer pool.deinit();
     try pool.init(.{
         .allocator = allocator,
         .n_jobs = parsed.args.threads,
     });
 
-    var downloads_mutex = std.Thread.Mutex{};
-    var pending_downloads = std.StringHashMap(void).init(allocator);
-    defer pending_downloads.deinit();
-
-    const ctx = Context.init(
-        parsed.args.tarball_dir,
-        &downloads_mutex,
-        &pending_downloads,
-    );
-
+    const pending_downloads = std.StringHashMap(void).init(allocator);
+    var ctx = Context.init(parsed.args.tarball_dir, .{}, pending_downloads);
+    defer ctx.deinit();
     while (true) {
         const conn = server.accept() catch |err| {
             std.log.err("Accept connection failed, err: {s}", .{@errorName(err)});
             continue;
         };
         std.log.debug("Got new connection, addr:{any}", .{conn.address});
-        pool.spawn(accept, .{ allocator, ctx, conn }) catch |err| {
+        pool.spawn(accept, .{ allocator, &ctx, conn }) catch |err| {
             std.log.err("Spawn worker task failed, err: {s}", .{@errorName(err)});
             continue;
         };
     }
 }
 
-fn accept(allocator: Allocator, ctx: Context, conn: std.net.Server.Connection) void {
+fn accept(allocator: Allocator, ctx: *Context, conn: std.net.Server.Connection) void {
     defer conn.stream.close();
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -116,7 +113,7 @@ fn accept(allocator: Allocator, ctx: Context, conn: std.net.Server.Connection) v
     }
 }
 
-fn serveRequest(arena_allocator: Allocator, ctx: Context, request: *std.http.Server.Request) !void {
+fn serveRequest(arena_allocator: Allocator, ctx: *Context, request: *std.http.Server.Request) !void {
     const path = request.head.target;
     const i = std.mem.lastIndexOfScalar(u8, path, '/') orelse unreachable;
     const requested_file = path[i + 1 ..];
@@ -143,7 +140,7 @@ fn serveRequest(arena_allocator: Allocator, ctx: Context, request: *std.http.Ser
 
 fn loadTarball(
     arena_allocator: Allocator,
-    ctx: Context,
+    ctx: *Context,
     filename: []const u8,
 ) ![]u8 {
     const tarball_path = try std.fmt.allocPrint(arena_allocator, "{s}/{s}", .{ ctx.download_dir, filename });

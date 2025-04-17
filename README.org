@@ -1,3 +1,8 @@
+#+begin_quote
+[!TIP]
+Repo Move to https://github.com/jiacai2050/my-works/tree/main/zms
+#+end_quote
+
 * ZMS
 [[https://github.com/jiacai2050/zms/actions/workflows/CI.yml][https://github.com/jiacai2050/zms/actions/workflows/CI.yml/badge.svg]]
 
